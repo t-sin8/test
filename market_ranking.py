@@ -19,7 +19,6 @@ def get_trading_date():
     深夜0時〜朝5時前までの実行であれば、日付を「前日」にする。
     """
     now = datetime.datetime.now()
-    # もし朝5時前（0:00〜4:59）に実行された場合は、1日前（昨日）の日付にする
     if now.hour < 5:
         trading_date = now - datetime.timedelta(days=1)
     else:
@@ -96,7 +95,7 @@ def get_matsui_market_ranking(market_id):
 def process_market(market_id, market_name, file_suffix):
     """各市場のデータ取得、保存、比較を一括で行う関数"""
     print(f"\n==========================================")
-    print(f" 📈 【{market_name}】売買代金ランキング 取得開始")
+    print(f" 📈 【{market_name}】売買代金ランキング")
     print("==========================================")
     
     ranking_data = get_matsui_market_ranking(market_id)
@@ -106,20 +105,18 @@ def process_market(market_id, market_name, file_suffix):
         
     df_new = pd.DataFrame(ranking_data)
     
-    # 修正：深夜実行を考慮したインテリジェントな日付取得
     target_date_str = get_trading_date()
     current_filename = f"{target_date_str}_{file_suffix}.csv"
     df_new.to_csv(current_filename, index=False, encoding="utf-8-sig")
     
     print(f"✅ 【データ日付: {target_date_str}】{market_name}({len(df_new)}件)を取得・保存しました！")
     
-    # 過去ファイルの自動検出
     all_files = [f for f in os.listdir('.') if re.match(r'^\d{8}_' + file_suffix + r'\.csv$', f)]
     all_files.sort()
     
     if len(all_files) < 2:
-        print(f"💡 【初回確認】{market_name}のベースファイルが作成されました。明日以降、自動比較されます。")
-        print(f"👇 本日の【{market_name}】データ一覧 (1位〜100位すべて表示):")
+        print(f"💡 【初回確認】ベースファイル作成。明日以降自動比較されます。")
+        print(f"👇 本日の【{market_name}】データ一覧 (1位〜100位):")
         pd.set_option('display.max_rows', 110)
         print(df_new.to_string(index=False, formatters={
             "現在値": "{:,.1f}".format, "出来高": "{:,}".format, "売買代金(百万円)": "{:,}".format
@@ -127,13 +124,12 @@ def process_market(market_id, market_name, file_suffix):
         return
 
     old_filename = all_files[-2]
-    print(f"🔄 前回データ '{old_filename}' との順位変動を自動計算します...")
+    print(f"🔄 前回データ '{old_filename}' との変動計算...")
     
     df_old = pd.read_csv(old_filename, dtype={"コード": str})
     
     old_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_old.iterrows()}
     old_names = {str(row["コード"]): row["銘柄名"] for _, row in df_old.iterrows()}
-    
     new_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_new.iterrows()}
     new_names = {str(row["コード"]): row["銘柄名"] for _, row in df_new.iterrows()}
     
@@ -144,7 +140,7 @@ def process_market(market_id, market_name, file_suffix):
     added = new_set - old_set
     stayed = old_set & new_set
     
-    print(f"\n📊 {market_name} 変動比較結果 ({old_filename} → {current_filename})")
+    print(f"\n📊 {market_name} 変動比較結果")
     print("-" * 42)
     
     print(f"🛑 100位圏内から【抜けた】銘柄:")
@@ -178,7 +174,7 @@ def send_to_discord(webhook_url, message):
         print("⚠️ DiscordのWebhook URLが設定されていないため、送信をスキップします。")
         return
     
-    # Discordの2000文字制限対策：文字数が多い場合は1900文字ごとに分割して送信
+    # 万が一これでも2000文字を超えた場合は分割して送る安全機能
     if len(message) > 2000:
         for i in range(0, len(message), 1900):
             payload = {"content": message[i:i+1900]}
@@ -189,7 +185,6 @@ def send_to_discord(webhook_url, message):
         requests.post(webhook_url, json=payload)
 
 def main():
-    # GitHubのSecretsからDiscordのURLを安全に読み込む
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
     
     markets = [
@@ -198,25 +193,24 @@ def main():
         {"id": 3, "name": "東証グロース", "suffix": "growth"}
     ]
     
-    print("🚀 主要3市場売買代金ランキング自動一括取得システム（深夜日付対応版）を起動します...")
+    print("🚀 主要3市場売買代金ランキング自動一括取得システムを起動します...")
     
-    # 画面への出力を横取りしてテキスト（文字列）化する処理
-    old_stdout = sys.stdout
-    sys.stdout = mystdout = StringIO()
-    
-    try:
-        for m in markets:
+    # ★改良ポイント: 市場ごとにデータを「その都度」キャッチしてDiscordに個別に送る
+    for m in markets:
+        old_stdout = sys.stdout
+        sys.stdout = mystdout = StringIO()
+        
+        try:
             process_market(m["id"], m["name"], m["suffix"])
-        print("\n🎉 主要3市場すべてのデータ取得・処理が正常に完了しました！")
-    finally:
-        sys.stdout = old_stdout
-    
-    # 画面に出るはずだった内容をすべて変数に格納
-    final_report = mystdout.getvalue()
-    
-    # 自分のPCのコンソールにも結果を出しつつ、Discordにも送信する
-    print(final_report)
-    send_to_discord(webhook_url, f"```\n{final_report}\n```")
+        finally:
+            sys.stdout = old_stdout
+            
+        market_report = mystdout.getvalue()
+        print(market_report) # GitHub側のログにも出力
+        
+        # 1つの市場ごとにDiscordへ送信（これで文字数制限を安全に回避）
+        send_to_discord(webhook_url, f"```\n{market_report}\n```")
+        time.sleep(2) # 連続送信によるエラーを防ぐための2秒のウェイト
 
 if __name__ == '__main__':
     main()
