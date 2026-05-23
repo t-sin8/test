@@ -1,0 +1,44 @@
+name: Run Matsui Market Ranking
+
+on:
+  schedule:
+    # 毎日日本時間の「16:30」に自動実行する設定（世界標準時UTCでは 07:30）
+    - cron: '30 7 * * *'
+  workflow_dispatch: # 手動でいつでも動かせるボタンも一応つけておきます
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 過去のCSVファイルを正しく読み込むために履歴をすべて取得
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install pandas requests beautifulsoup4 lxml
+
+      - name: Run script
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python market_ranking.py
+
+      - name: Commit and Push CSV files
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          # 新しく生成されたCSVファイルがあればステージングに追加
+          git add *.csv
+          # 差分がある場合のみコミットして保存
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto-update market ranking CSV [skip ci]"
+            git push
+          else
+            echo "No changes in CSV files."
+          fi
