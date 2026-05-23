@@ -3,7 +3,7 @@ import os
 import re
 import time
 import sys
-from io import StringIO, BytesIO
+from io import BytesIO
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
@@ -88,57 +88,50 @@ def get_matsui_market_ranking(market_id):
             
     return parsed_data
 
-def text_to_image(text, title_name):
-    """テキストを等幅フォントの綺麗な画像(PNG)に変換する関数"""
-    # 視認性の高いダークテーマの配色
-    bg_color = (43, 45, 49)     # Discord風のダークグレー
-    text_color = (220, 221, 222) # 明るいグレー
+def text_to_image(lines, title_name):
+    """テキストをスマホでもクッキリ読める大きな等幅画像に変換する関数"""
+    bg_color = (30, 31, 34)       # Discord純正のダーク背景
+    text_color = (242, 243, 245)   # クッキリ見える白文字
     
-    # Linux環境(GitHub Actions)の日本語等幅フォントパス
-    font_path = "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"
+    # Linux環境(GitHub Actions)に100%入っている日本語フォントを強制指定
+    font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf"
     if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf"
+        font_path = "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"
         
+    # 文字サイズを24px（かなり大きめ）に設定して視認性を確保
     try:
-        font = ImageFont.truetype(font_path, 16)
+        font = ImageFont.truetype(font_path, 24)
+        title_font = ImageFont.truetype(font_path, 28)
     except:
         font = ImageFont.load_default()
+        title_font = ImageFont.load_default()
 
-    lines = [f"=== {title_name} ==="] + text.split("\n")
-    
-    # 画像のサイズを計算
-    max_width = 0
-    total_height = 20
-    
-    for line in lines:
-        # 簡易的な文字幅計算（全角2マス、半角1マス）
-        w = sum(2 if ord(c) > 127 else 1 for c in line) * 10
-        if w > max_width:
-            max_width = w
-        total_height += 24
+    # 画像のサイズを「スマホで見やすい横幅」で固定計算
+    # 全角スペースや数字のズレを防ぐため固定のキャンバスサイズを設定
+    img_width = 1000
+    line_height = 40
+    total_height = (len(lines) + 2) * line_height + 40
         
-    # 余白を持たせて土台画像を作成
-    img = Image.new("RGB", (max_width + 40, total_height + 20), bg_color)
+    img = Image.new("RGB", (img_width, total_height), bg_color)
     draw = ImageDraw.Draw(img)
     
-    # 文字を描画
-    y = 20
+    # タイトル（市場名）を描画
+    draw.text((30, 20), f"■ {title_name}", fill=(88, 101, 242), font=title_font) # Discordブルーのアクセント
+    
+    # 各銘柄の行を描画
+    y = 70
     for line in lines:
-        draw.text((20, y), line, fill=text_color, font=font)
-        y += 24
+        draw.text((30, y), line, fill=text_color, font=font)
+        y += line_height
         
     return img
 
-def process_market(market_id, market_name, file_suffix):
-    """各市場のデータ取得、保存、比較を行い、レポートテキストを返す"""
-    report = []
-    report.append(f"📈 【{market_name}】売買代金ランキング")
-    report.append("=" * 45)
-    
+def process_market(market_id, market_name, file_suffix, webhook_url):
+    """各市場のデータ処理、保存、および25行ずつの画像分割送信"""
     ranking_data = get_matsui_market_ranking(market_id)
     if not ranking_data:
-        report.append(f"❌ {market_name} のデータ自動取得に失敗しました。")
-        return "\n".join(report)
+        print(f"❌ {market_name} のデータ自動取得に失敗しました。")
+        return
         
     df_new = pd.DataFrame(ranking_data)
     target_date_str = get_trading_date()
@@ -148,94 +141,79 @@ def process_market(market_id, market_name, file_suffix):
     all_files = [f for f in os.listdir('.') if re.match(r'^\d{8}_' + file_suffix + r'\.csv$', f)]
     all_files.sort()
     
+    lines_pool = []
+    
+    # 綺麗に幅を揃えるための文字列フォーマット（日本語幅を考慮）
     if len(all_files) < 2:
-        report.append(f"💡 【初回】ベースファイル作成。明日以降自動比較されます。")
-        report.append(f"本日の【{market_name}】データ一覧 (1位〜100位):")
-        
-        # 綺麗に列を揃えるための整形フォーマット
+        lines_pool.append("【初回実行】ベースデータを作成しました。明日から比較します。")
         for _, row in df_new.iterrows():
-            report.append(f"{row['順位']:>3}位  {row['コード']}  {row['銘柄名']:<14}  現:{row['現在値']:>8,.1f}  代金:{row['売買代金(百万円)']:>8,}")
-        return "\n".join(report)
-
-    old_filename = all_files[-2]
-    df_old = pd.read_csv(old_filename, dtype={"コード": str})
-    
-    old_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_old.iterrows()}
-    old_names = {str(row["コード"]): row["銘柄名"] for _, row in df_old.iterrows()}
-    new_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_new.iterrows()}
-    new_names = {str(row["コード"]): row["銘柄名"] for _, row in df_new.iterrows()}
-    
-    old_set = set(old_ranks.keys())
-    new_set = set(new_ranks.keys())
-    
-    removed = old_set - new_set
-    added = new_set - old_set
-    stayed = old_set & new_set
-    
-    report.append(f"🛑 100位圏内から【抜けた】銘柄:")
-    if removed:
-        for code in sorted(removed, key=lambda x: old_ranks[x]):
-            report.append(f"  {code}  {old_names[code]:<14} (旧:{old_ranks[code]}位)")
+            # 銘柄名を左詰めで綺麗に12文字分確保する整形
+            name_padded = f"{row['銘柄名']}{' ' * (12 - len(row['銘柄名']))}"[:12]
+            lines_pool.append(f"{row['順位']:>3}位  {row['コード']}  {name_padded}  現:{row['現在値']:>8,.1f}  代金:{row['売買代金(百万円)']:>7,}")
     else:
-        report.append("  なし")
+        old_filename = all_files[-2]
+        df_old = pd.read_csv(old_filename, dtype={"コード": str})
         
-    report.append(f"\n✨ 100位圏内に【新しく入った】銘柄:")
-    if added:
-        for code in sorted(added, key=lambda x: new_ranks[x]):
-            report.append(f"  {code}  {new_names[code]:<14} (新:{new_ranks[code]}位)")
-    else:
-        report.append("  なし")
+        old_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_old.iterrows()}
+        old_names = {str(row["コード"]): row["銘柄名"] for _, row in df_old.iterrows()}
+        new_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_new.iterrows()}
+        new_names = {str(row["コード"]): row["銘柄名"] for _, row in df_new.iterrows()}
         
-    report.append(f"\n🔄 【維持・順位変動】 (今回の順位順):")
-    if stayed:
-        for code in sorted(stayed, key=lambda x: new_ranks[x]):
-            o_rank = old_ranks[code]
-            n_rank = new_ranks[code]
-            diff = o_rank - n_rank
-            diff_str = f"↑ +{diff}" if diff > 0 else (f"↓ {diff}" if diff < 0 else "→ キープ")
-            report.append(f"  {code}  {new_names[code]:<14} : 新{n_rank:>3}位 ← 旧{o_rank:>3}位 ({diff_str})")
-    else:
-        report.append("  なし")
+        old_set = set(old_ranks.keys())
+        new_set = set(new_ranks.keys())
         
-    return "\n".join(report)
-
-def send_to_discord_as_image(webhook_url, text, title_name):
-    """テキストを画像化して、行単位できれいに分割してDiscordへアップロードする関数"""
-    if not webhook_url:
-        return
+        removed = old_set - new_set
+        added = new_set - old_set
+        stayed = old_set & new_set
         
-    # 📌 改善ポイント1: 行(改行)単位で綺麗にぶつ切りを防ぐロジック
-    lines = text.split("\n")
-    chunks = []
-    current_chunk = []
-    current_length = 0
-    
-    for line in lines:
-        # 1ブロックあたり約1500文字(余裕を持つ)で行ごとに区切る
-        if current_length + len(line) + 1 > 1500:
-            chunks.append("\n".join(current_chunk))
-            current_chunk = [line]
-            current_length = len(line)
+        lines_pool.append("🛑 100位圏内から【抜けた】銘柄:")
+        if removed:
+            for code in sorted(removed, key=lambda x: old_ranks[x]):
+                name_padded = f"{old_names[code]}{' ' * (12 - len(old_names[code]))}"[:12]
+                lines_pool.append(f"  {code}  {name_padded} (旧:{old_ranks[code]}位)")
         else:
-            current_chunk.append(line)
-            current_length += len(line) + 1
+            lines_pool.append("  なし")
             
-    if current_chunk:
-        chunks.append("\n".join(current_chunk))
+        lines_pool.append("\n✨ 100位圏内に【新しく入った】銘柄:")
+        if added:
+            for code in sorted(added, key=lambda x: new_ranks[x]):
+                name_padded = f"{new_names[code]}{' ' * (12 - len(new_names[code]))}"[:12]
+                lines_pool.append(f"  {code}  {name_padded} (新:{new_ranks[code]}位)")
+        else:
+            lines_pool.append("  なし")
+            
+        lines_pool.append("\n🔄 【維持・順位変動】 (今回の順位順):")
+        if stayed:
+            for code in sorted(stayed, key=lambda x: new_ranks[x]):
+                o_rank = old_ranks[code]
+                n_rank = new_ranks[code]
+                diff = o_rank - n_rank
+                diff_str = f"↑ +{diff}" if diff > 0 else (f"↓ {diff}" if diff < 0 else "→ キープ")
+                name_padded = f"{new_names[code]}{' ' * (12 - len(new_names[code]))}"[:12]
+                lines_pool.append(f"  {code}  {name_padded} : 新{n_rank:>3}位 ← 旧{o_rank:>3}位 ({diff_str})")
+        else:
+            lines_pool.append("  なし")
 
-    # 📌 改善ポイント2: 各ブロックを画像に変換してDiscordに送信
-    for idx, chunk_text in enumerate(chunks):
-        img = text_to_image(chunk_text, f"{title_name} ({idx+1}/{len(chunks)})")
+    # 📌 ここがキモ：必ず「25行ずつ」で綺麗にぶつ切りを防いで画像化して送信
+    chunk_size = 25
+    total_chunks = (len(lines_pool) + chunk_size - 1) // chunk_size
+    
+    for i in range(0, len(lines_pool), chunk_size):
+        chunk_lines = lines_pool[i:i+chunk_size]
+        chunk_idx = (i // chunk_size) + 1
         
-        # 画像をメモリ上のバイナリデータに変換
-        arr = BytesIO()
-        img.save(arr, format='PNG')
-        arr.seek(0)
+        # 画像の生成
+        title_with_page = f"{market_name} ({chunk_idx}/{total_chunks})"
+        img = text_to_image(chunk_lines, title_with_page)
         
-        # DiscordのWebhookでファイルを送信
-        files = {"file": (f"{title_name}_{idx+1}.png", arr, "image/png")}
-        requests.post(webhook_url, files=files)
-        time.sleep(2)
+        # Discordへ送信
+        if webhook_url:
+            arr = BytesIO()
+            img.save(arr, format='PNG')
+            arr.seek(0)
+            files = {"file": (f"{file_suffix}_{chunk_idx}.png", arr, "image/png")}
+            requests.post(webhook_url, files=files)
+            time.sleep(2)
 
 def main():
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -246,15 +224,10 @@ def main():
         {"id": 3, "name": "東証グロース", "suffix": "growth"}
     ]
     
-    print("🚀 主要3市場ランキングシステムを起動（画像送信モード）...")
+    print("🚀 高解像度・文字崩れ対策版システムを起動します...")
     
     for m in markets:
-        # 各市場のテキストレポートを生成
-        market_report = process_market(m["id"], m["name"], m["suffix"])
-        print(market_report) # GitHub側のログ用
-        
-        # 画像化して送信を実行
-        send_to_discord_as_image(webhook_url, market_report, m["name"])
+        process_market(m["id"], m["name"], m["suffix"], webhook_url)
         time.sleep(3)
 
 if __name__ == '__main__':
