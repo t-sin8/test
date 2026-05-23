@@ -3,10 +3,11 @@ import os
 import re
 import time
 import sys
-from io import StringIO
+from io import StringIO, BytesIO
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image, ImageDraw, ImageFont
 
 def clean_numeric_string(text):
     """文字列から数字（とマイナス、小数点）だけを抽出して返すヘルパー関数"""
@@ -14,10 +15,7 @@ def clean_numeric_string(text):
     return cleaned
 
 def get_trading_date():
-    """
-    プログラムを実行した時間に応じて、適切な「相場の日付」を返す関数。
-    深夜0時〜朝5時前までの実行であれば、日付を「前日」にする。
-    """
+    """深夜0時〜朝5時前までの実行であれば、日付を「前日」にする"""
     now = datetime.datetime.now()
     if now.hour < 5:
         trading_date = now - datetime.timedelta(days=1)
@@ -34,11 +32,10 @@ def get_matsui_market_ranking(market_id):
     ]
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    for page_idx, url in enumerate(urls):
+    for url in urls:
         try:
             time.sleep(1)
             res = requests.get(url, headers=headers, timeout=15)
@@ -86,46 +83,81 @@ def get_matsui_market_ranking(market_id):
                         "出来高": volume,
                         "売買代金(百万円)": trading_value
                     })
-                        
         except Exception as e:
-            print(f"⚠️ 処理中にエラーが発生しました: {e}")
+            print(f"⚠️ エラー: {e}")
             
     return parsed_data
 
+def text_to_image(text, title_name):
+    """テキストを等幅フォントの綺麗な画像(PNG)に変換する関数"""
+    # 視認性の高いダークテーマの配色
+    bg_color = (43, 45, 49)     # Discord風のダークグレー
+    text_color = (220, 221, 222) # 明るいグレー
+    
+    # Linux環境(GitHub Actions)の日本語等幅フォントパス
+    font_path = "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"
+    if not os.path.exists(font_path):
+        font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf"
+        
+    try:
+        font = ImageFont.truetype(font_path, 16)
+    except:
+        font = ImageFont.load_default()
+
+    lines = [f"=== {title_name} ==="] + text.split("\n")
+    
+    # 画像のサイズを計算
+    max_width = 0
+    total_height = 20
+    
+    for line in lines:
+        # 簡易的な文字幅計算（全角2マス、半角1マス）
+        w = sum(2 if ord(c) > 127 else 1 for c in line) * 10
+        if w > max_width:
+            max_width = w
+        total_height += 24
+        
+    # 余白を持たせて土台画像を作成
+    img = Image.new("RGB", (max_width + 40, total_height + 20), bg_color)
+    draw = ImageDraw.Draw(img)
+    
+    # 文字を描画
+    y = 20
+    for line in lines:
+        draw.text((20, y), line, fill=text_color, font=font)
+        y += 24
+        
+    return img
+
 def process_market(market_id, market_name, file_suffix):
-    """各市場のデータ取得、保存、比較を一括で行う関数"""
-    print(f"\n==========================================")
-    print(f" 📈 【{market_name}】売買代金ランキング")
-    print("==========================================")
+    """各市場のデータ取得、保存、比較を行い、レポートテキストを返す"""
+    report = []
+    report.append(f"📈 【{market_name}】売買代金ランキング")
+    report.append("=" * 45)
     
     ranking_data = get_matsui_market_ranking(market_id)
     if not ranking_data:
-        print(f"❌ {market_name} のデータ自動取得に失敗しました。")
-        return
+        report.append(f"❌ {market_name} のデータ自動取得に失敗しました。")
+        return "\n".join(report)
         
     df_new = pd.DataFrame(ranking_data)
-    
     target_date_str = get_trading_date()
     current_filename = f"{target_date_str}_{file_suffix}.csv"
     df_new.to_csv(current_filename, index=False, encoding="utf-8-sig")
-    
-    print(f"✅ 【データ日付: {target_date_str}】{market_name}({len(df_new)}件)を取得・保存しました！")
     
     all_files = [f for f in os.listdir('.') if re.match(r'^\d{8}_' + file_suffix + r'\.csv$', f)]
     all_files.sort()
     
     if len(all_files) < 2:
-        print(f"💡 【初回確認】ベースファイル作成。明日以降自動比較されます。")
-        print(f"👇 本日の【{market_name}】データ一覧 (1位〜100位):")
-        pd.set_option('display.max_rows', 110)
-        print(df_new.to_string(index=False, formatters={
-            "現在値": "{:,.1f}".format, "出来高": "{:,}".format, "売買代金(百万円)": "{:,}".format
-        }))
-        return
+        report.append(f"💡 【初回】ベースファイル作成。明日以降自動比較されます。")
+        report.append(f"本日の【{market_name}】データ一覧 (1位〜100位):")
+        
+        # 綺麗に列を揃えるための整形フォーマット
+        for _, row in df_new.iterrows():
+            report.append(f"{row['順位']:>3}位  {row['コード']}  {row['銘柄名']:<14}  現:{row['現在値']:>8,.1f}  代金:{row['売買代金(百万円)']:>8,}")
+        return "\n".join(report)
 
     old_filename = all_files[-2]
-    print(f"🔄 前回データ '{old_filename}' との変動計算...")
-    
     df_old = pd.read_csv(old_filename, dtype={"コード": str})
     
     old_ranks = {str(row["コード"]): int(row["順位"]) for _, row in df_old.iterrows()}
@@ -140,49 +172,70 @@ def process_market(market_id, market_name, file_suffix):
     added = new_set - old_set
     stayed = old_set & new_set
     
-    print(f"\n📊 {market_name} 変動比較結果")
-    print("-" * 42)
-    
-    print(f"🛑 100位圏内から【抜けた】銘柄:")
+    report.append(f"🛑 100位圏内から【抜けた】銘柄:")
     if removed:
         for code in sorted(removed, key=lambda x: old_ranks[x]):
-            print(f"  {code}  {old_names[code]:<18} (旧: {old_ranks[code]}位)")
+            report.append(f"  {code}  {old_names[code]:<14} (旧:{old_ranks[code]}位)")
     else:
-        print("  なし")
+        report.append("  なし")
         
-    print(f"\n✨ 100位圏内に【新しく入った】銘柄:")
+    report.append(f"\n✨ 100位圏内に【新しく入った】銘柄:")
     if added:
         for code in sorted(added, key=lambda x: new_ranks[x]):
-            print(f"  {code}  {new_names[code]:<18} (新: {new_ranks[code]}位)")
+            report.append(f"  {code}  {new_names[code]:<14} (新:{new_ranks[code]}位)")
     else:
-        print("  なし")
+        report.append("  なし")
         
-    print(f"\n🔄 【維持・順位変動】の一覧 (今回の順位順):")
+    report.append(f"\n🔄 【維持・順位変動】 (今回の順位順):")
     if stayed:
         for code in sorted(stayed, key=lambda x: new_ranks[x]):
             o_rank = old_ranks[code]
             n_rank = new_ranks[code]
             diff = o_rank - n_rank
             diff_str = f"↑ +{diff}" if diff > 0 else (f"↓ {diff}" if diff < 0 else "→ キープ")
-            print(f"  {code}  {new_names[code]:<18} : 新 {n_rank:>3}位 ← 旧 {o_rank:>3}位 ({diff_str})")
+            report.append(f"  {code}  {new_names[code]:<14} : 新{n_rank:>3}位 ← 旧{o_rank:>3}位 ({diff_str})")
     else:
-        print("  なし")
+        report.append("  なし")
+        
+    return "\n".join(report)
 
-def send_to_discord(webhook_url, message):
-    """結果をDiscordに送信する関数"""
+def send_to_discord_as_image(webhook_url, text, title_name):
+    """テキストを画像化して、行単位できれいに分割してDiscordへアップロードする関数"""
     if not webhook_url:
-        print("⚠️ DiscordのWebhook URLが設定されていないため、送信をスキップします。")
         return
+        
+    # 📌 改善ポイント1: 行(改行)単位で綺麗にぶつ切りを防ぐロジック
+    lines = text.split("\n")
+    chunks = []
+    current_chunk = []
+    current_length = 0
     
-    # 万が一これでも2000文字を超えた場合は分割して送る安全機能
-    if len(message) > 2000:
-        for i in range(0, len(message), 1900):
-            payload = {"content": message[i:i+1900]}
-            requests.post(webhook_url, json=payload)
-            time.sleep(1)
-    else:
-        payload = {"content": message}
-        requests.post(webhook_url, json=payload)
+    for line in lines:
+        # 1ブロックあたり約1500文字(余裕を持つ)で行ごとに区切る
+        if current_length + len(line) + 1 > 1500:
+            chunks.append("\n".join(current_chunk))
+            current_chunk = [line]
+            current_length = len(line)
+        else:
+            current_chunk.append(line)
+            current_length += len(line) + 1
+            
+    if current_chunk:
+        chunks.append("\n".join(current_chunk))
+
+    # 📌 改善ポイント2: 各ブロックを画像に変換してDiscordに送信
+    for idx, chunk_text in enumerate(chunks):
+        img = text_to_image(chunk_text, f"{title_name} ({idx+1}/{len(chunks)})")
+        
+        # 画像をメモリ上のバイナリデータに変換
+        arr = BytesIO()
+        img.save(arr, format='PNG')
+        arr.seek(0)
+        
+        # DiscordのWebhookでファイルを送信
+        files = {"file": (f"{title_name}_{idx+1}.png", arr, "image/png")}
+        requests.post(webhook_url, files=files)
+        time.sleep(2)
 
 def main():
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -193,24 +246,16 @@ def main():
         {"id": 3, "name": "東証グロース", "suffix": "growth"}
     ]
     
-    print("🚀 主要3市場売買代金ランキング自動一括取得システムを起動します...")
+    print("🚀 主要3市場ランキングシステムを起動（画像送信モード）...")
     
-    # ★改良ポイント: 市場ごとにデータを「その都度」キャッチしてDiscordに個別に送る
     for m in markets:
-        old_stdout = sys.stdout
-        sys.stdout = mystdout = StringIO()
+        # 各市場のテキストレポートを生成
+        market_report = process_market(m["id"], m["name"], m["suffix"])
+        print(market_report) # GitHub側のログ用
         
-        try:
-            process_market(m["id"], m["name"], m["suffix"])
-        finally:
-            sys.stdout = old_stdout
-            
-        market_report = mystdout.getvalue()
-        print(market_report) # GitHub側のログにも出力
-        
-        # 1つの市場ごとにDiscordへ送信（これで文字数制限を安全に回避）
-        send_to_discord(webhook_url, f"```\n{market_report}\n```")
-        time.sleep(2) # 連続送信によるエラーを防ぐための2秒のウェイト
+        # 画像化して送信を実行
+        send_to_discord_as_image(webhook_url, market_report, m["name"])
+        time.sleep(3)
 
 if __name__ == '__main__':
     main()
