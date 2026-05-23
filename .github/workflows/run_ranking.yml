@@ -4,7 +4,7 @@ on:
   schedule:
     # 毎日日本時間の「16:30」に自動実行する設定（世界標準時UTCでは 07:30）
     - cron: '30 7 * * *'
-  workflow_dispatch: # 手動でいつでも動かせるボタンも一応つけておきます
+  workflow_dispatch: # 手動でいつでも動かせるボタン
 
 jobs:
   run-bot:
@@ -22,7 +22,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pandas requests beautifulsoup4 lxml
+          pip install pandas requests beautifulsoup4 lxml Pillow
 
       - name: Run script
         env:
