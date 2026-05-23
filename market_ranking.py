@@ -3,11 +3,9 @@ import os
 import re
 import time
 import sys
-from io import BytesIO
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from PIL import Image, ImageDraw, ImageFont
 
 def clean_numeric_string(text):
     """文字列から数字（とマイナス、小数点）だけを抽出して返すヘルパー関数"""
@@ -24,7 +22,7 @@ def get_trading_date():
     return trading_date.strftime("%Y%m%d")
 
 def get_matsui_market_ranking(market_id):
-    """指定された市場IDから100位までの詳細データを自動取得する関数"""
+    """指定された市場IDから100位までの詳細データを自動取得する関数（CSV用）"""
     parsed_data = []
     urls = [
         f"https://finance.matsui.co.jp/ranking-trading-top/index?market={market_id}",
@@ -88,51 +86,14 @@ def get_matsui_market_ranking(market_id):
             
     return parsed_data
 
-def text_to_image(lines, title_name):
-    """テキストをスマホでもクッキリ読める大きな等幅画像に変換する関数"""
-    bg_color = (30, 31, 34)       # Discord純正のダーク背景
-    text_color = (242, 243, 245)   # クッキリ見える白文字
-    
-    # Linux環境(GitHub Actions)に100%入っている日本語フォントを強制指定
-    font_path = "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.otf"
-    if not os.path.exists(font_path):
-        font_path = "/usr/share/fonts/truetype/fonts-japanese-gothic.ttf"
-        
-    # 文字サイズを24px（かなり大きめ）に設定して視認性を確保
-    try:
-        font = ImageFont.truetype(font_path, 24)
-        title_font = ImageFont.truetype(font_path, 28)
-    except:
-        font = ImageFont.load_default()
-        title_font = ImageFont.load_default()
-
-    # 画像のサイズを「スマホで見やすい横幅」で固定計算
-    # 全角スペースや数字のズレを防ぐため固定のキャンバスサイズを設定
-    img_width = 1000
-    line_height = 40
-    total_height = (len(lines) + 2) * line_height + 40
-        
-    img = Image.new("RGB", (img_width, total_height), bg_color)
-    draw = ImageDraw.Draw(img)
-    
-    # タイトル（市場名）を描画
-    draw.text((30, 20), f"■ {title_name}", fill=(88, 101, 242), font=title_font) # Discordブルーのアクセント
-    
-    # 各銘柄の行を描画
-    y = 70
-    for line in lines:
-        draw.text((30, y), line, fill=text_color, font=font)
-        y += line_height
-        
-    return img
-
 def process_market(market_id, market_name, file_suffix, webhook_url):
-    """各市場のデータ処理、保存、および25行ずつの画像分割送信"""
+    """各市場のデータを取得・CSVへ全保存し、Discordへは3情報のみを綺麗な行単位でテキスト送信する"""
     ranking_data = get_matsui_market_ranking(market_id)
     if not ranking_data:
         print(f"❌ {market_name} のデータ自動取得に失敗しました。")
         return
         
+    # 1. 【今まで通り】すべてのデータをCSVにしっかり保存
     df_new = pd.DataFrame(ranking_data)
     target_date_str = get_trading_date()
     current_filename = f"{target_date_str}_{file_suffix}.csv"
@@ -141,15 +102,16 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
     all_files = [f for f in os.listdir('.') if re.match(r'^\d{8}_' + file_suffix + r'\.csv$', f)]
     all_files.sort()
     
+    # Discord用のテキストを作成するプール
     lines_pool = []
+    lines_pool.append(f"📈 【{market_name}】売買代金ランキング")
+    lines_pool.append("=" * 35)
     
-    # 綺麗に幅を揃えるための文字列フォーマット（日本語幅を考慮）
+    # 2. 【改善】Discordに送るテキストは「順位・コード・銘柄名」の3つだけに絞る
     if len(all_files) < 2:
-        lines_pool.append("【初回実行】ベースデータを作成しました。明日から比較します。")
+        lines_pool.append("💡【初回確認】明日から前日比の自動比較がスタートします。")
         for _, row in df_new.iterrows():
-            # 銘柄名を左詰めで綺麗に12文字分確保する整形
-            name_padded = f"{row['銘柄名']}{' ' * (12 - len(row['銘柄名']))}"[:12]
-            lines_pool.append(f"{row['順位']:>3}位  {row['コード']}  {name_padded}  現:{row['現在値']:>8,.1f}  代金:{row['売買代金(百万円)']:>7,}")
+            lines_pool.append(f"{row['順位']:>3}位  {row['コード']}  {row['銘柄名']}")
     else:
         old_filename = all_files[-2]
         df_old = pd.read_csv(old_filename, dtype={"コード": str})
@@ -169,16 +131,14 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
         lines_pool.append("🛑 100位圏内から【抜けた】銘柄:")
         if removed:
             for code in sorted(removed, key=lambda x: old_ranks[x]):
-                name_padded = f"{old_names[code]}{' ' * (12 - len(old_names[code]))}"[:12]
-                lines_pool.append(f"  {code}  {name_padded} (旧:{old_ranks[code]}位)")
+                lines_pool.append(f"  {code}  {old_names[code]} (旧:{old_ranks[code]}位)")
         else:
             lines_pool.append("  なし")
             
         lines_pool.append("\n✨ 100位圏内に【新しく入った】銘柄:")
         if added:
             for code in sorted(added, key=lambda x: new_ranks[x]):
-                name_padded = f"{new_names[code]}{' ' * (12 - len(new_names[code]))}"[:12]
-                lines_pool.append(f"  {code}  {name_padded} (新:{new_ranks[code]}位)")
+                lines_pool.append(f"  {code}  {new_names[code]} (新:{new_ranks[code]}位)")
         else:
             lines_pool.append("  なし")
             
@@ -189,31 +149,35 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
                 n_rank = new_ranks[code]
                 diff = o_rank - n_rank
                 diff_str = f"↑ +{diff}" if diff > 0 else (f"↓ {diff}" if diff < 0 else "→ キープ")
-                name_padded = f"{new_names[code]}{' ' * (12 - len(new_names[code]))}"[:12]
-                lines_pool.append(f"  {code}  {name_padded} : 新{n_rank:>3}位 ← 旧{o_rank:>3}位 ({diff_str})")
+                lines_pool.append(f"  {code}  {new_names[code]} : 新{n_rank:>3}位 (旧:{o_rank:>3}位 {diff_str})")
         else:
             lines_pool.append("  なし")
 
-    # 📌 ここがキモ：必ず「25行ずつ」で綺麗にぶつ切りを防いで画像化して送信
-    chunk_size = 25
-    total_chunks = (len(lines_pool) + chunk_size - 1) // chunk_size
+    # 3. 【徹底対策】2000文字を超えないよう「行（銘柄）の区切り」で安全に分割して送信
+    if not webhook_url:
+        return
+
+    current_chunk = []
+    current_length = 0
     
-    for i in range(0, len(lines_pool), chunk_size):
-        chunk_lines = lines_pool[i:i+chunk_size]
-        chunk_idx = (i // chunk_size) + 1
-        
-        # 画像の生成
-        title_with_page = f"{market_name} ({chunk_idx}/{total_chunks})"
-        img = text_to_image(chunk_lines, title_with_page)
-        
-        # Discordへ送信
-        if webhook_url:
-            arr = BytesIO()
-            img.save(arr, format='PNG')
-            arr.seek(0)
-            files = {"file": (f"{file_suffix}_{chunk_idx}.png", arr, "image/png")}
-            requests.post(webhook_url, files=files)
-            time.sleep(2)
+    for line in lines_pool:
+        # Discordの制限2000文字に対し、1600文字の手前で次のブロックに回す安全設計
+        # これにより、1つの銘柄行が途中でバラバラに引き裂かれるのを100%防ぎます
+        if current_length + len(line) + 1 > 1600:
+            message = "```\n" + "\n".join(current_chunk) + "\n```"
+            requests.post(webhook_url, json={"content": message})
+            time.sleep(1.5)
+            
+            current_chunk = [line]
+            current_length = len(line)
+        else:
+            current_chunk.append(line)
+            current_length += len(line) + 1
+            
+    if current_chunk:
+        message = "```\n" + "\n".join(current_chunk) + "\n```"
+        requests.post(webhook_url, json={"content": message})
+        time.sleep(1.5)
 
 def main():
     webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
@@ -224,11 +188,11 @@ def main():
         {"id": 3, "name": "東証グロース", "suffix": "growth"}
     ]
     
-    print("🚀 高解像度・文字崩れ対策版システムを起動します...")
+    print("🚀 テキスト回帰・3情報スリム化システムを起動します...")
     
     for m in markets:
         process_market(m["id"], m["name"], m["suffix"], webhook_url)
-        time.sleep(3)
+        time.sleep(2)
 
 if __name__ == '__main__':
     main()
