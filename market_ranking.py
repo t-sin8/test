@@ -41,9 +41,9 @@ def get_matsui_market_ranking(market_id):
 
 def send_to_discord(webhook_url, lines):
     if not webhook_url: return
-    # 40行ずつに分割して送信する安全な形式に修正
+    # 40行ずつ分割して送信
     for i in range(0, len(lines), 40):
         message = "
 http://googleusercontent.com/immersive_entry_chip/0
 
-これで再度ワークフローを実行してみてください。文法エラーが解消され、正しく通知が届くはずです。
+このコードを保存して再度実行すれば、エラーが解消され、回転率を含めたデータが正しく通知されるはずです。
