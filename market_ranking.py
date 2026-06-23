@@ -6,55 +6,108 @@ import pandas as pd
 import requests
 from bs4 import BeautifulSoup
 
-# --- (以下、ヘルパー関数などは既存のものを維持) ---
-def clean_numeric_string(text):
-    return re.sub(r'[^\d\.\-]', '', text)
+# Discordへの送信関数（これがないと通知されません）
+def send_to_discord(webhook_url, lines):
+    if not webhook_url:
+        return
+    
+    # メッセージを1600文字以内で分割して送信
+    chunk = []
+    current_len = 0
+    for line in lines:
+        if current_len + len(line) + 1 > 1600:
+            message = "```\n" + "\n".join(chunk) + "\n```"
+            requests.post(webhook_url, json={"content": message})
+            time.sleep(1.5)
+            chunk = []
+            current_len = 0
+        chunk.append(line)
+        current_len += len(line) + 1
+    
+    if chunk:
+        message = "```\n" + "\n".join(chunk) + "\n```"
+        requests.post(webhook_url, json={"content": message})
 
-def get_trading_date():
-    now = datetime.datetime.now()
-    if now.hour < 5:
-        return (now - datetime.timedelta(days=1)).strftime("%Y%m%d")
-    return now.strftime("%Y%m%d")
-
-# --- (market_ranking.py のメインロジック) ---
+def get_matsui_market_ranking(market_id):
+    parsed_data = []
+    urls = [
+        f"https://finance.matsui.co.jp/ranking-trading-top/index?market={market_id}",
+        f"https://finance.matsui.co.jp/ranking-trading-top/index?market={market_id}&page=2"
+    ]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    
+    for url in urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=15)
+            soup = BeautifulSoup(res.text, "html.parser")
+            table = soup.find("table", class_="m-table")
+            if not table: continue
+            
+            for row in table.find("tbody").find_all("tr"):
+                tds = row.find_all("td")
+                if len(tds) < 6: continue
+                
+                name_tag = tds[1].find("a")
+                code_tag = tds[1].find("span")
+                if not (name_tag and code_tag): continue
+                
+                parsed_data.append({
+                    "順位": int(re.sub(r'[^\d]', '', tds[0].text)),
+                    "コード": re.search(r'\d{4}', code_tag.text).group(),
+                    "銘柄名": name_tag.text.strip(),
+                    "現在値": float(re.sub(r'[^\d.]', '', tds[2].text.replace(',', ''))),
+                    "売買代金(百万円)": int(re.sub(r'[^\d]', '', tds[5].text.replace(',', '')))
+                })
+        except: continue
+    return parsed_data
 
 def process_market(market_id, market_name, file_suffix, webhook_url):
-    # 1. ランキング取得
     ranking_data = get_matsui_market_ranking(market_id)
     if not ranking_data: return
     
-    # 2. 株式数データ(shares.csv)を読み込み
+    # 株式数データの読み込み
     try:
         shares_df = pd.read_csv("shares.csv", dtype={"コード": str})
-        shares_map = dict(zip(shares_df["コード"], shares_df["発行済株式数"]))
+        shares_map = {str(c).strip(): int(s) for c, s in zip(shares_df["コード"], shares_df["発行済株式数"])}
     except:
         shares_map = {}
 
     df = pd.DataFrame(ranking_data)
     
-    # 3. 時価総額と回転率の計算 (時価総額 = 現在値 * 発行済株式数)
-    # 単位合わせ: 売買代金は百万円、時価総額も百万円単位に換算
-    df["時価総額(百万円)"] = df.apply(lambda x: (x["現在値"] * shares_map.get(str(x["コード"]), 0)) / 1000000, axis=1)
-    df["回転率(%)"] = (df["売買代金(百万円)"] / df["時価総額(百万円)"] * 100).round(2)
+    # 時価総額・回転率計算
+    def calc(row):
+        shares = shares_map.get(str(row["コード"]).strip(), 0)
+        market_cap = (row["現在値"] * shares) / 1000000 if shares > 0 else 0
+        turnover = (row["売買代金(百万円)"] / market_cap * 100) if market_cap > 0 else 0
+        return market_cap, turnover
 
-    # 4. CSV保存
-    df.to_csv(f"{get_trading_date()}_{file_suffix}.csv", index=False, encoding="utf-8-sig")
+    df[["時価総額", "回転率"]] = df.apply(calc, axis=1, result_type="expand")
 
-    # 5. Discord通知用テキスト作成
-    lines_pool = [f"📈 【{market_name}】売買代金ランキング", "=" * 35]
-    
-    # 基本の3情報
+    # Discord通知用テキスト作成（強制的に作成する）
+    lines = [f"📈 【{market_name}】売買代金ランキング", "=" * 35]
     for _, row in df.iterrows():
-        lines_pool.append(f"{row['順位']:>3}位 {row['コード']} {row['銘柄名']}")
+        lines.append(f"{row['順位']:>3}位 {row['コード']} {row['銘柄名']}")
 
-    # 🔥 回転率シグナル（注目枠：回転率5%以上）
-    high_turnover = df[df["回転率(%)"] >= 5.0].sort_values("回転率(%)", ascending=False)
+    # 注目銘柄
+    high_turnover = df[df["回転率"] >= 5.0].sort_values("回転率", ascending=False)
     if not high_turnover.empty:
-        lines_pool.append("\n🔥【注目の大口・材料銘柄】(回転率5%超):")
+        lines.append("\n🔥【注目の大口・材料銘柄】(回転率5%超):")
         for _, row in high_turnover.head(5).iterrows():
-            lines_pool.append(f"  {row['コード']} {row['銘柄名']} (回転率:{row['回転率(%)']}% / 代金:{row['売買代金(百万円)']}M)")
+            lines.append(f"  {row['コード']} {row['銘柄名']} ({row['回転率']:.1f}% / {row['売買代金(百万円)']}M)")
 
-    # (Discord送信ロジックは前回同様)
-    send_to_discord(webhook_url, lines_pool)
+    # 確実に送信
+    send_to_discord(webhook_url, lines)
 
-# (※get_matsui_market_ranking関数とsend_to_discord関数は前回のコードをそのままお使いください)
+def main():
+    webhook_url = os.environ.get("DISCORD_WEBHOOK_URL")
+    markets = [
+        (1, "東証プライム", "prime"),
+        (2, "東証スタンダード", "standard"),
+        (3, "東証グロース", "growth")
+    ]
+    for mid, mname, msuf in markets:
+        process_market(mid, mname, msuf, webhook_url)
+        time.sleep(2)
+
+if __name__ == '__main__':
+    main()
