@@ -116,12 +116,20 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
         shares = shares_map.get(code_str, 0)
         if shares == 0:
             return 0.0
-        # 時価総額(百万円) = 現在値 * 発行済株式数 / 1,000,000
         market_cap = (row["現在値"] * shares) / 1000000
         if market_cap <= 0:
             return 0.0
-        # 回転率(%) = 売買代金(百万円) / 時価総額(百万円) * 100
         return (row["売買代金(百万円)"] / market_cap) * 100
+
+    # --- 【新規追加】回転率に応じた色分け絵文字を返すヘルパー関数 ---
+    def get_turnover_emoji(turnover):
+        if 1.0 <= turnover < 2.0:
+            return " 🔵"
+        elif 2.0 <= turnover < 3.0:
+            return " 🟡"
+        elif turnover >= 3.0:
+            return " 🔴"
+        return "" # 0%〜0.9%は何もつけない
     # ----------------------------------------------------------------------------------
     
     # Discord用のテキストを作成するプール
@@ -129,12 +137,13 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
     lines_pool.append(f"📈 【{market_name}】売買代金ランキング")
     lines_pool.append("=" * 35)
     
-    # 2. 【改善】Discordに送るテキストは「順位・コード・銘柄名」の3つに絞る＋末尾に回転率を追加
+    # 2. 【改善】Discordに送るテキストは「順位・コード・銘柄名」の3つに絞る＋末尾に回転率（と絵文字）を追加
     if len(all_files) < 2:
         lines_pool.append("💡【初回確認】明日から前日比の自動比較がスタートします。")
         for _, row in df_new.iterrows():
             turnover_val = calculate_turnover(row)
-            lines_pool.append(f"{row['順位']:>3}位  {row['コード']}  {row['銘柄名']} (回転率:{turnover_val:.1f}%)")
+            emoji_str = get_turnover_emoji(turnover_val)
+            lines_pool.append(f"{row['順位']:>3}位  {row['コード']}  {row['銘柄名']} (回転率:{turnover_val:.1f}%{emoji_str})")
     else:
         old_filename = all_files[-2]
         df_old = pd.read_csv(old_filename, dtype={"コード": str})
@@ -161,10 +170,10 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
         lines_pool.append("\n✨ 100位圏内に【新しく入った】銘柄:")
         if added:
             for code in sorted(added, key=lambda x: new_ranks[x]):
-                # 新規に入った銘柄の行を取得して回転率を出す
                 matched_rows = df_new[df_new["コード"] == code]
                 turnover_val = calculate_turnover(matched_rows.iloc[0]) if not matched_rows.empty else 0.0
-                lines_pool.append(f"  {code}  {new_names[code]} (新:{new_ranks[code]}位 / 回転率:{turnover_val:.1f}%)")
+                emoji_str = get_turnover_emoji(turnover_val)
+                lines_pool.append(f"  {code}  {new_names[code]} (新:{new_ranks[code]}位 / 回転率:{turnover_val:.1f}%{emoji_str})")
         else:
             lines_pool.append("  なし")
             
@@ -176,11 +185,11 @@ def process_market(market_id, market_name, file_suffix, webhook_url):
                 diff = o_rank - n_rank
                 diff_str = f"↑ +{diff}" if diff > 0 else (f"↓ {diff}" if diff < 0 else "→ キープ")
                 
-                # 維持した銘柄の行を取得して回転率を出す
                 matched_rows = df_new[df_new["コード"] == code]
                 turnover_val = calculate_turnover(matched_rows.iloc[0]) if not matched_rows.empty else 0.0
+                emoji_str = get_turnover_emoji(turnover_val)
                 
-                lines_pool.append(f"  {code}  {new_names[code]} : 新{n_rank:>3}位 (旧:{o_rank:>3}位 {diff_str} / 回転率:{turnover_val:.1f}%)")
+                lines_pool.append(f"  {code}  {new_names[code]} : 新{n_rank:>3}位 (旧:{o_rank:>3}位 {diff_str} / 回転率:{turnover_val:.1f}%{emoji_str})")
         else:
             lines_pool.append("  なし")
 
