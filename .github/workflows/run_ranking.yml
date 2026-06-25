@@ -3,7 +3,7 @@ name: Run Matsui Market Ranking
 on:
   schedule:
     # 毎日日本時間の「16:30」に自動実行する設定（世界標準時UTCでは 07:30）
-    - cron: '47 7 * * *'
+    - cron: '47 6 * * *'
   workflow_dispatch: # 手動でいつでも動かせるボタン
 
 jobs:
